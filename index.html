@@ -1,0 +1,350 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Connections — Play</title>
+<link rel="stylesheet" href="styles.css" />
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">CONNECTIONS <span>· family edition</span></div>
+    <nav>
+      <a href="index.html" class="active">Play</a>
+      <a href="leaderboard.html">Leaderboard</a>
+      <a href="host.html">Host</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="demoBanner" class="demo-banner" style="display:none">
+    <strong>Demo mode.</strong> Firebase isn’t configured yet, so this uses a sample
+    puzzle stored only in your browser. See <code>README.md</code> to connect Firebase.
+  </div>
+
+  <h1 id="pTitle">Today’s Puzzle</h1>
+  <p class="subtitle">Create four groups of four! Find the groups without making 4 mistakes.</p>
+
+  <div id="noPuzzle" style="display:none">
+    <p>No puzzle has been published yet. Check back soon, or ask the host to publish one.</p>
+  </div>
+
+  <div id="gameArea" style="display:none">
+    <div id="solvedRows"></div>
+    <div id="board" class="board"></div>
+
+    <div class="mistakes">
+      <span>Mistakes remaining:</span>
+      <span id="dots" style="display:flex; gap:8px"></span>
+    </div>
+
+    <div class="btn-row">
+      <button id="shuffleBtn" class="ghost">Shuffle</button>
+      <button id="deselectBtn" class="ghost" disabled>Deselect all</button>
+      <button id="submitBtn" class="primary" disabled>Submit</button>
+    </div>
+  </div>
+</div>
+
+<!-- Name gate -->
+<div id="nameGate" class="overlay">
+  <div class="card">
+    <h2>Who’s playing?</h2>
+    <p class="subtitle" style="margin-bottom:12px">Enter your name so your result counts on this week’s leaderboard.</p>
+    <input id="nameInput" type="text" placeholder="Your name" autocomplete="off" />
+    <div id="nameErr" class="error" style="display:none"></div>
+    <div class="btn-row"><button id="startBtn" class="primary">Start playing</button></div>
+  </div>
+</div>
+
+<!-- Already played -->
+<div id="playedGate" class="overlay hidden">
+  <div class="card">
+    <h2 id="playedTitle">You already played today</h2>
+    <div id="playedGrid" class="result-grid"></div>
+    <p id="playedMsg" class="subtitle"></p>
+    <div class="btn-row">
+      <button class="ghost" onclick="location.href='leaderboard.html'">Leaderboard</button>
+      <button id="shareBtn" class="primary">Share result</button>
+    </div>
+  </div>
+</div>
+
+<!-- End screen -->
+<div id="endGate" class="overlay hidden">
+  <div class="card">
+    <h2 id="endTitle"></h2>
+    <div id="endGrid" class="result-grid"></div>
+    <p id="endMsg" class="subtitle"></p>
+    <div class="btn-row">
+      <button class="ghost" onclick="location.href='leaderboard.html'">Leaderboard</button>
+      <button id="endShareBtn" class="primary">Share result</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="firebase-config.js"></script>
+<script src="app.js"></script>
+<script>
+const { LEVELS, loadActivePuzzle, getExistingResult, saveResult, normalizeName } = App;
+
+if (!App.CONFIGURED) document.getElementById("demoBanner").style.display = "block";
+
+const $ = (id) => document.getElementById(id);
+let puzzle = null;
+let playerName = "";
+let tiles = [];            // {word, level}
+let selected = [];         // indices into tiles
+let solvedLevels = [];     // levels already found (in order)
+let mistakes = 0;          // 0..4
+const MAX_MISTAKES = 4;
+let guessHistory = [];     // array of arrays of levels, for the emoji grid
+let puzzleReady;           // promise for the puzzle load, so clicks can await it
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 1400);
+}
+
+// ---- Boot ----
+puzzleReady = loadActivePuzzle();
+
+(async function init() {
+  // Prefill remembered name right away (don't wait on the network).
+  const remembered = localStorage.getItem("playerName");
+  if (remembered) $("nameInput").value = remembered;
+
+  try {
+    puzzle = await puzzleReady;
+  } catch (e) {
+    console.error("Failed to load puzzle:", e);
+    $("nameGate").classList.add("hidden");
+    $("noPuzzle").style.display = "block";
+    $("noPuzzle").innerHTML =
+      "<p>Couldn’t load the puzzle. If you just connected Firebase, make sure Firestore " +
+      "is created and the rules from <code>firestore.rules</code> are published.</p>";
+    return;
+  }
+  if (!puzzle) {
+    $("nameGate").classList.add("hidden");
+    $("noPuzzle").style.display = "block";
+    return;
+  }
+  $("pTitle").textContent = puzzle.title?.trim() || "Today’s Puzzle";
+})();
+
+$("startBtn").onclick = async () => {
+  const name = normalizeName($("nameInput").value);
+  if (name.length < 1) {
+    $("nameErr").textContent = "Please enter a name.";
+    $("nameErr").style.display = "block";
+    return;
+  }
+  // The puzzle may still be loading (Firestore can be slow). Wait for it.
+  const btn = $("startBtn");
+  if (!puzzle) {
+    const prevLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Loading…";
+    try { puzzle = await puzzleReady; } catch (_) { /* handled below */ }
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
+  if (!puzzle) {
+    $("nameErr").textContent = "No puzzle is available right now. Please try again shortly.";
+    $("nameErr").style.display = "block";
+    return;
+  }
+  $("nameErr").style.display = "none";
+
+  playerName = name;
+  localStorage.setItem("playerName", name);
+
+  // Block replay: if they already have a result for this puzzle, show it.
+  try {
+    const existing = await getExistingResult(puzzle.date, name);
+    if (existing) {
+      $("nameGate").classList.add("hidden");
+      showPlayed(existing);
+      return;
+    }
+  } catch (e) {
+    console.error("Couldn’t check for an existing result:", e);
+    // Don't block play if the check fails — just let them play.
+  }
+  $("nameGate").classList.add("hidden");
+  startGame();
+};
+$("nameInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("startBtn").click(); });
+
+function startGame() {
+  $("gameArea").style.display = "block";
+  tiles = [];
+  puzzle.groups.forEach((g) => g.words.forEach((w) => tiles.push({ word: w, level: g.level })));
+  shuffle();
+  renderDots();
+  renderBoard();
+}
+
+function shuffle() {
+  for (let i = tiles.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [tiles[i], tiles[j]] = [tiles[j], tiles[i]];
+  }
+}
+
+function renderBoard() {
+  const board = $("board");
+  board.innerHTML = "";
+  tiles.forEach((t, i) => {
+    const el = document.createElement("button");
+    el.className = "tile" + (selected.includes(i) ? " selected" : "");
+    el.textContent = t.word;
+    el.onclick = () => toggle(i, el);
+    board.appendChild(el);
+  });
+  updateControls();
+}
+
+function toggle(i, el) {
+  const at = selected.indexOf(i);
+  if (at >= 0) selected.splice(at, 1);
+  else {
+    if (selected.length >= 4) return;
+    selected.push(i);
+    el.classList.add("pop");
+    setTimeout(() => el.classList.remove("pop"), 250);
+  }
+  renderBoard();
+}
+
+function updateControls() {
+  $("submitBtn").disabled = selected.length !== 4;
+  $("deselectBtn").disabled = selected.length === 0;
+}
+
+$("shuffleBtn").onclick = () => { shuffle(); renderBoard(); };
+$("deselectBtn").onclick = () => { selected = []; renderBoard(); };
+
+$("submitBtn").onclick = () => {
+  if (selected.length !== 4) return;
+  const chosen = selected.map((i) => tiles[i]);
+  const levels = chosen.map((t) => t.level);
+  guessHistory.push([...levels]);
+
+  const allSame = levels.every((l) => l === levels[0]);
+  if (allSame) {
+    solveGroup(levels[0]);
+    return;
+  }
+
+  // Count how many share the most common level -> "one away".
+  const counts = {};
+  levels.forEach((l) => (counts[l] = (counts[l] || 0) + 1));
+  const best = Math.max(...Object.values(counts));
+
+  // Shake selected tiles.
+  document.querySelectorAll(".tile").forEach((el, idx) => {
+    if (selected.includes(idx)) {
+      el.classList.add("shake");
+      setTimeout(() => el.classList.remove("shake"), 350);
+    }
+  });
+
+  mistakes++;
+  renderDots();
+  if (best === 3) toast("One away…");
+  else toast("Not quite.");
+
+  if (mistakes >= MAX_MISTAKES) setTimeout(() => endGame(false), 500);
+};
+
+function solveGroup(level) {
+  solvedLevels.push(level);
+  // Remove those tiles from the board.
+  tiles = tiles.filter((t) => t.level !== level);
+  selected = [];
+  renderSolved();
+  renderBoard();
+  toast("Nice!");
+  if (solvedLevels.length === 4) setTimeout(() => endGame(true), 400);
+}
+
+function renderSolved() {
+  const box = $("solvedRows");
+  box.innerHTML = "";
+  solvedLevels.forEach((lvl) => {
+    const g = puzzle.groups.find((x) => x.level === lvl);
+    const row = document.createElement("div");
+    row.className = "solved-row lvl" + lvl;
+    row.innerHTML = `<div class="cat">${g.category}</div><div class="members">${g.words.join(", ")}</div>`;
+    box.appendChild(row);
+  });
+}
+
+function renderDots() {
+  const box = $("dots");
+  box.innerHTML = "";
+  for (let i = 0; i < MAX_MISTAKES; i++) {
+    const d = document.createElement("span");
+    d.className = "dot" + (i < mistakes ? " used" : "");
+    box.appendChild(d);
+  }
+}
+
+function buildGrid() {
+  // Emoji grid of every guess (like NYT share).
+  return guessHistory
+    .map((row) => row.map((lvl) => LEVELS[lvl].emoji).join(""))
+    .join("\n");
+}
+
+async function endGame(solved) {
+  const grid = buildGrid();
+  await saveResult({
+    date: puzzle.date, name: playerName, solved, mistakes, grid,
+  });
+
+  // If they lost, reveal the remaining groups.
+  if (!solved) {
+    const remaining = puzzle.groups
+      .filter((g) => !solvedLevels.includes(g.level))
+      .sort((a, b) => a.level - b.level);
+    remaining.forEach((g) => solvedLevels.push(g.level));
+    renderSolved();
+    $("board").innerHTML = "";
+  }
+  $("gameArea").querySelector(".btn-row").style.display = "none";
+
+  $("endTitle").textContent = solved ? "Solved it! 🎉" : "Better luck next time";
+  $("endGrid").textContent = grid;
+  $("endMsg").textContent = solved
+    ? `You finished with ${mistakes} mistake${mistakes === 1 ? "" : "s"}.`
+    : "You ran out of guesses — answers revealed above.";
+  $("endGate").classList.remove("hidden");
+  wireShare($("endShareBtn"), solved, grid);
+}
+
+function showPlayed(r) {
+  $("playedGrid").textContent = r.grid || "";
+  $("playedMsg").textContent = r.solved
+    ? `You solved it with ${r.mistakes} mistake${r.mistakes === 1 ? "" : "s"}.`
+    : "You didn’t finish this one. Only one attempt per puzzle!";
+  $("playedGate").classList.remove("hidden");
+  wireShare($("shareBtn"), r.solved, r.grid);
+}
+
+function wireShare(btn, solved, grid) {
+  btn.onclick = async () => {
+    const header = `Connections — ${puzzle.title || puzzle.date}\n${solved ? "Solved ✅" : "Did not finish ❌"}`;
+    const text = header + "\n" + grid;
+    try {
+      if (navigator.share) await navigator.share({ text });
+      else { await navigator.clipboard.writeText(text); toast("Copied to clipboard!"); }
+    } catch (_) { /* user cancelled */ }
+  };
+}
+</script>

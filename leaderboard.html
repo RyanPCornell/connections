@@ -1,0 +1,144 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Connections — Leaderboard</title>
+<link rel="stylesheet" href="styles.css" />
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">CONNECTIONS <span>· leaderboard</span></div>
+    <nav>
+      <a href="index.html">Play</a>
+      <a href="leaderboard.html" class="active">Leaderboard</a>
+      <a href="host.html">Host</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <h1>Weekly Leaderboard</h1>
+  <p class="subtitle">Ranked by puzzles solved, then fewest total mistakes. Resets each week.</p>
+
+  <div class="select-row">
+    <label style="margin:0">Week:</label>
+    <select id="weekPick"></select>
+  </div>
+
+  <div id="empty" style="display:none"><p>No results for this week yet — go play!</p></div>
+
+  <table class="lb" id="table" style="display:none">
+    <thead>
+      <tr>
+        <th class="rank">#</th>
+        <th>Name</th>
+        <th>Solved</th>
+        <th>Mistakes</th>
+        <th>DNF</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <h2>By puzzle</h2>
+  <div id="byDay"></div>
+</div>
+
+<script src="firebase-config.js"></script>
+<script src="app.js"></script>
+<script>
+const { weekKey, getWeekResults, LEVELS } = App;
+
+const $ = (id) => document.getElementById(id);
+
+// Build a list of the last 8 week keys to choose from.
+function recentWeeks(n = 8) {
+  const weeks = [];
+  const d = new Date();
+  for (let i = 0; i < n; i++) {
+    const w = weekKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() - i * 7)
+      .toISOString().slice(0, 10));
+    if (!weeks.includes(w)) weeks.push(w);
+  }
+  return weeks;
+}
+
+function fmtWeek(w) {
+  return w === weekKey() ? `${w} (this week)` : w;
+}
+
+const picker = $("weekPick");
+recentWeeks().forEach((w) => {
+  const o = document.createElement("option");
+  o.value = w; o.textContent = fmtWeek(w);
+  picker.appendChild(o);
+});
+picker.value = weekKey();
+picker.onchange = () => render(picker.value);
+
+async function render(wKey) {
+  const results = await getWeekResults(wKey);
+
+  if (!results.length) {
+    $("table").style.display = "none";
+    $("byDay").innerHTML = "";
+    $("empty").style.display = "block";
+    return;
+  }
+  $("empty").style.display = "none";
+
+  // Aggregate per player across the week.
+  const byName = {};
+  results.forEach((r) => {
+    const k = r.name;
+    if (!byName[k]) byName[k] = { name: r.name, solved: 0, dnf: 0, mistakes: 0, plays: 0 };
+    byName[k].plays++;
+    if (r.solved) { byName[k].solved++; byName[k].mistakes += r.mistakes; }
+    else byName[k].dnf++;
+  });
+
+  const rows = Object.values(byName).sort((a, b) =>
+    b.solved - a.solved || a.mistakes - b.mistakes || a.dnf - b.dnf ||
+    a.name.localeCompare(b.name));
+
+  const tb = $("tbody");
+  tb.innerHTML = "";
+  rows.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="rank">${i + 1}</td>
+      <td><strong>${escapeHtml(r.name)}</strong></td>
+      <td><span class="pill solved">${r.solved}</span></td>
+      <td>${r.solved ? r.mistakes : "—"}</td>
+      <td>${r.dnf ? `<span class="pill dnf">${r.dnf}</span>` : "—"}</td>`;
+    tb.appendChild(tr);
+  });
+  $("table").style.display = "table";
+
+  // Per-puzzle breakdown.
+  const byDate = {};
+  results.forEach((r) => { (byDate[r.date] ||= []).push(r); });
+  const dayBox = $("byDay");
+  dayBox.innerHTML = "";
+  Object.keys(byDate).sort().reverse().forEach((date) => {
+    const list = byDate[date].sort((a, b) =>
+      (b.solved - a.solved) || (a.mistakes - b.mistakes));
+    const wrap = document.createElement("div");
+    wrap.style.marginBottom = "18px";
+    const items = list.map((r) => {
+      const status = r.solved
+        ? `<span class="pill solved">solved · ${r.mistakes} mistake${r.mistakes === 1 ? "" : "s"}</span>`
+        : `<span class="pill dnf">did not finish</span>`;
+      return `<tr><td><strong>${escapeHtml(r.name)}</strong></td><td>${status}</td></tr>`;
+    }).join("");
+    wrap.innerHTML = `<h3 style="margin:0 0 6px">${date}</h3>
+      <table class="lb"><tbody>${items}</tbody></table>`;
+    dayBox.appendChild(wrap);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+render(picker.value);
+</script>

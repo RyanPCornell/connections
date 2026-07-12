@@ -1,0 +1,26 @@
+rules_version = '2';
+// Paste this into: Firebase console > Firestore Database > Rules > Publish.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Puzzles: anyone can read (to play); only a signed-in host can write.
+    match /puzzles/{date} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Which puzzle is live: readable by all, writable only by the host.
+    match /settings/{doc} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Results: anyone can read the leaderboard and submit their own result.
+    // Only the host can edit or delete results (e.g. to clean up).
+    match /results/{id} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if request.auth != null;
+    }
+  }
+}
